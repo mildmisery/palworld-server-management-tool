@@ -88,7 +88,10 @@ public partial class MainWindow : Window
             if (_settings is null)
             {
                 Close();
+                return;
             }
+
+            await CheckForAppUpdatesAsync();
         }
         catch (IOException exception)
         {
@@ -799,6 +802,13 @@ public partial class MainWindow : Window
             return false;
         }
 
+        UpdateUnsavedChangesIndicator();
+        if (_settings is null || _unsavedChangesText!.IsVisible || !File.Exists(_settings.FilePath))
+        {
+            _statusText!.Text = "Save or reload your settings before managing worlds. A saved configuration file is required.";
+            return false;
+        }
+
         return true;
     }
 
@@ -823,7 +833,7 @@ public partial class MainWindow : Window
     {
         if (!CanManageSaves() || !await ConfirmSaveOperationAsync(
                 "Back up active world",
-                "Copy the complete active world folder to a timestamped backup?"))
+                "Copy the complete active world folder and the current saved configuration to a timestamped backup?"))
         {
             return;
         }
@@ -831,7 +841,7 @@ public partial class MainWindow : Window
         BindFromUi();
         var serverName = _settings?.Values["ServerName"] ?? "Palworld Server";
         await RunSaveOperationAsync(() =>
-            $"Backup created: {GetManagedSaveDisplayName(_saveManager!.BackupActiveSave(serverName))}");
+            $"Backup created: {GetManagedSaveDisplayName(_saveManager!.BackupActiveSave(serverName, _settings!.FilePath))}");
     }
 
     private async void OnCreateNewWorldClicked(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
@@ -870,7 +880,7 @@ public partial class MainWindow : Window
         var serverName = _settings.Values["ServerName"];
         if (!await ConfirmSaveOperationAsync(
                 "Create new world",
-                "The active world will be copied to Backups, then moved to Disabled. " +
+                "The active world and its saved configuration will be preserved in Backups and Disabled. " +
                 $"Settings will be reloaded from:{Environment.NewLine}{templatePath}{Environment.NewLine}{Environment.NewLine}" +
                 $"The active settings file ({_settings.FilePath}) will also be reset to those template values. " +
                 "Palworld will create a fresh world the next time the server starts. Continue?"))
@@ -880,7 +890,7 @@ public partial class MainWindow : Window
 
         var created = await RunSaveOperationAsync(() =>
         {
-            var backupPath = _saveManager!.DisableActiveSave(serverName);
+            var backupPath = _saveManager!.DisableActiveSave(serverName, _settings.FilePath);
             var resetSettings = new ServerSettings(_settings.FilePath);
             foreach (var parameter in ServerSettings.Parameters)
             {
@@ -914,7 +924,7 @@ public partial class MainWindow : Window
     {
         if (!CanManageSaves() || !await ConfirmSaveOperationAsync(
                 "Disable active world",
-                "The active world will be backed up and moved to Disabled. Continue?"))
+                "The active world and its saved configuration will be backed up and stored in Disabled. Continue?"))
         {
             return;
         }
@@ -922,43 +932,63 @@ public partial class MainWindow : Window
         BindFromUi();
         var serverName = _settings?.Values["ServerName"] ?? "Palworld Server";
         await RunSaveOperationAsync(() =>
-            $"World disabled. Backup created: {GetManagedSaveDisplayName(_saveManager!.DisableActiveSave(serverName))}");
+            $"World disabled. Backup created: {GetManagedSaveDisplayName(_saveManager!.DisableActiveSave(serverName, _settings!.FilePath))}");
     }
 
     private async void OnRestoreBackupClicked(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
     {
-        if (!CanManageSaves() || _backupList!.SelectedIndex < 0 ||
-            !await ConfirmSaveOperationAsync(
-                "Restore backup",
-                "Restore the selected backup as the active world? The current world, if any, will first be backed up and moved to Disabled."))
+        if (!CanManageSaves() || _backupList!.SelectedIndex < 0)
         {
             return;
         }
 
         var backup = _backups[_backupList.SelectedIndex];
+        var hasSettings = WorldSaveManager.HasSettingsSnapshot(backup);
+        if (!await ConfirmWorldRestoreAsync(backup, hasSettings))
+        {
+            return;
+        }
+
         await RunSaveOperationAsync(() =>
         {
-            _saveManager!.RestoreBackup(backup);
-            return $"Restored world {backup.Id} from backup.";
-        });
+            _saveManager!.RestoreBackup(backup, _settings!.FilePath, _settings.Values["ServerName"],
+                allowMissingSettings: !hasSettings);
+            return $"Restored world {backup.Id}. " +
+                (hasSettings ? "Restored its saved configuration." : "Kept the current configuration.");
+        }, reloadSettings: true);
     }
 
     private async void OnEnableSaveClicked(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
     {
-        if (!CanManageSaves() || _disabledSaveList!.SelectedIndex < 0 ||
-            !await ConfirmSaveOperationAsync(
-                "Enable disabled world",
-                "Make the selected disabled save active? The current world, if any, will first be backed up and moved to Disabled."))
+        if (!CanManageSaves() || _disabledSaveList!.SelectedIndex < 0)
         {
             return;
         }
 
         var save = _disabledSaves[_disabledSaveList.SelectedIndex];
+        var hasSettings = WorldSaveManager.HasSettingsSnapshot(save);
+        if (!await ConfirmWorldRestoreAsync(save, hasSettings))
+        {
+            return;
+        }
+
         await RunSaveOperationAsync(() =>
         {
-            _saveManager!.EnableSave(save);
-            return $"Enabled world {save.Id}.";
-        });
+            _saveManager!.EnableSave(save, _settings!.FilePath, _settings.Values["ServerName"],
+                allowMissingSettings: !hasSettings);
+            return $"Enabled world {save.Id}. " +
+                (hasSettings ? "Restored its saved configuration." : "Kept the current configuration.");
+        }, reloadSettings: true);
+    }
+
+    private Task<bool> ConfirmWorldRestoreAsync(WorldSave save, bool hasSettings)
+    {
+        return ConfirmSaveOperationAsync("Load world and settings",
+            $"Load {GetManagedSaveDisplayName(save.DirectoryPath)} as the active world? " +
+            "The current world and its saved configuration will first be backed up and stored in Disabled. " +
+            (hasSettings
+                ? $"This will replace the configuration at {_settings!.FilePath} with this world's snapshot."
+                : "WARNING: This older save has no configuration snapshot. Your current configuration will be kept."));
     }
 
     private void OnRefreshServerClicked(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
@@ -1301,17 +1331,25 @@ public partial class MainWindow : Window
         return !IsPalworldServerRunning();
     }
 
-    private async Task<bool> RunSaveOperationAsync(Func<string> operation)
+    private async Task<bool> RunSaveOperationAsync(Func<string> operation, bool reloadSettings = false)
     {
+        var content = (Control)Content!;
+        var wasEnabled = content.IsEnabled;
         try
         {
-            if (IsPalworldServerRunning())
+            if (!CanManageSaves())
             {
-                _statusText!.Text = "Stop the Palworld server before managing world saves.";
                 return false;
             }
 
+            content.IsEnabled = false;
             var message = await Task.Run(operation);
+            if (reloadSettings)
+            {
+                _settings!.Load();
+                BindToUi();
+            }
+
             _statusText!.Text = message;
             RefreshSaveLists();
             return true;
@@ -1333,6 +1371,10 @@ public partial class MainWindow : Window
             _statusText!.Text = $"Save operation failed: {exception.Message}";
             RefreshSaveLists();
             return false;
+        }
+        finally
+        {
+            content.IsEnabled = wasEnabled;
         }
     }
 }

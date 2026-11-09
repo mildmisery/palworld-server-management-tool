@@ -11,6 +11,10 @@
         <StackPanel DockPanel.Dock="Top" Spacing="8">
             <TextBlock Text="Palworld Dedicated Server Settings" FontSize="22" FontWeight="Bold" />
             <TextBlock Text="Edit documented server and world settings. Leave a field blank to use the server's default. Values are saved as Palworld's OptionSettings tuple." TextWrapping="Wrap" />
+            <StackPanel Orientation="Horizontal" Spacing="10">
+                <Button x:Name="CheckForUpdatesButton" Content="Check for updates" Click="OnCheckForUpdatesClicked" />
+                <TextBlock x:Name="UpdateStatusText" VerticalAlignment="Center" TextWrapping="Wrap" />
+            </StackPanel>
         </StackPanel>
 
         <StackPanel DockPanel.Dock="Bottom" Spacing="8" Margin="0,10,0,0">
